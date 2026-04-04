@@ -1,6 +1,6 @@
 import { Card, CardContent } from "@/components/ui/card";
 import { ExternalLink, Clock } from "lucide-react";
-import type { NewsArticle } from "@/types/news";
+import type { NewsArticle } from "@/types/news-types";
 
 interface NewsCardProps {
   article: NewsArticle;

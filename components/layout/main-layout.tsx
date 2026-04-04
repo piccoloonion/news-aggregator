@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { Category } from "@/types/news";
+import type { Category } from "@/types/news-types";
 import { TopBar } from "@/components/layout/top-bar";
 import { DesktopSidebar } from "@/components/layout/desktop-sidebar";
 import { MobileBottomNav } from "@/components/layout/mobile-bottom-nav";

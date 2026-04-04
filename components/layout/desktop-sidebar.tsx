@@ -1,6 +1,6 @@
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Globe, Cpu, Briefcase, Trophy } from "lucide-react";
-import type { Category } from "@/types/news";
+import type { Category } from "@/types/news-types";
 
 interface DesktopSidebarProps {
   category: Category;

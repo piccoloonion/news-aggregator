@@ -1,4 +1,4 @@
-import type { NewsArticle, Category } from '@/types/news';
+import type { NewsArticle, Category } from '@/types/news-types';
 
 const CATEGORY_MAP: Record<Category, string> = {
   global: 'general',

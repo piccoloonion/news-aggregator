@@ -2,7 +2,7 @@ import { NewsCard } from "@/components/news-card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { AlertCircle, RefreshCw } from "lucide-react";
-import type { NewsArticle } from "@/types/news";
+import type { NewsArticle } from "@/types/news-types";
 
 interface NewsGridProps {
   articles: NewsArticle[];

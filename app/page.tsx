@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import type { Category, NewsState } from "@/types/news";
+import type { Category, NewsState } from "@/types/news-types";
 import { MainLayout } from "@/components/layout/main-layout";
 import { NewsGrid } from "@/components/news-grid";
 

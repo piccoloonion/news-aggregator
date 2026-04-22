@@ -7,12 +7,29 @@ const VALID_CATEGORIES: Record<string, string> = {
   sports: 'sports',
 };
 
+const RSS_FEEDS: Record<string, string[]> = {
+  global: [
+    'https://feeds.bbci.co.uk/news/rss.xml',
+    'https://www.theguardian.com/uk/rss',
+  ],
+  technology: [
+    'https://news.ycombinator.com/rss',
+    'https://www.reddit.com/r/technology/.rss',
+  ],
+  business: [
+    'https://www.reddit.com/r/business/.rss',
+    'https://feeds.bbci.co.uk/news/business/rss.xml',
+  ],
+  sports: [
+    'https://www.reddit.com/r/sports/.rss',
+    'https://feeds.bbci.co.uk/sport/rss.xml',
+  ],
+};
+
 const API_BASE = 'https://newsapi.org/v2';
 const MAX_SEARCH_LENGTH = 100;
-const ALLOWED_IMAGE_HOSTS_DEFAULT = true; // Only allow http/https URLs
 
 // Simple in-memory rate limiter (per-process).
-// For production with multiple instances, use Redis or similar.
 const RATE_LIMIT_MAP = new Map<string, { count: number; resetAt: number }>();
 const RATE_LIMIT_MAX = 10;
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -39,7 +56,6 @@ function checkRateLimit(ip: string): { allowed: boolean; remaining: number } {
   return { allowed: true, remaining: RATE_LIMIT_MAX - entry.count };
 }
 
-// Validate that a URL is a safe http(s) URL
 function isValidUrl(url: string): boolean {
   if (!url || typeof url !== 'string') return false;
   try {
@@ -50,25 +66,16 @@ function isValidUrl(url: string): boolean {
   }
 }
 
-// Sanitize article data: validate URLs, strip dangerous content
 function sanitizeArticle(
   a: Record<string, unknown>,
   category: string
 ): { validForImage: boolean; article: Record<string, unknown> } {
   const url = String(a.url || '');
   const urlToImage = a.urlToImage ? String(a.urlToImage) : null;
-
-  // Reject articles without a valid http(s) URL
   const isValid = isValidUrl(url);
-
-  // Validate image URL: must be http/https or null
   const safeImage = urlToImage && isValidUrl(urlToImage) ? urlToImage : null;
-
-  // Clean title: strip potential HTML/script tags
   const rawTitle = String(a.title || '');
   const cleanTitle = rawTitle.replace(/<[^>]*>/g, '').trim();
-
-  // Clean description: strip potential HTML/script tags
   const rawDesc = a.description ? String(a.description) : null;
   const cleanDesc = rawDesc ? rawDesc.replace(/<[^>]*>/g, '').trim() : null;
 
@@ -92,6 +99,73 @@ function sanitizeArticle(
   };
 }
 
+// --- RSS Fallback Parser ---
+
+function extractTag(xml: string, tag: string): string | null {
+  const regex = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`);
+  const match = regex.exec(xml);
+  return match ? match[1].trim() : null;
+}
+
+function cleanText(text: string): string {
+  return text
+    .replace(/<[^>]*>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .trim();
+}
+
+function parseRSS(xml: string, category: string, maxItems = 10): Record<string, unknown>[] {
+  const articles: Record<string, unknown>[] = [];
+  const itemRegex = /<item>[\s\S]*?<\/item>/g;
+  let match;
+
+  while ((match = itemRegex.exec(xml)) !== null && articles.length < maxItems) {
+    const itemXml = match[0];
+    const title = extractTag(itemXml, 'title');
+    const link = extractTag(itemXml, 'link');
+    const description = extractTag(itemXml, 'description');
+    const pubDate = extractTag(itemXml, 'pubDate');
+
+    if (title && link && isValidUrl(link)) {
+      articles.push({
+        source: { name: 'RSS Feed', id: null },
+        title: cleanText(title),
+        description: description ? cleanText(description) : null,
+        url: link,
+        urlToImage: null,
+        publishedAt: pubDate || '',
+        category,
+      });
+    }
+  }
+
+  return articles;
+}
+
+async function fetchRSSFallback(category: string): Promise<Record<string, unknown>[]> {
+  const feeds = RSS_FEEDS[category] || RSS_FEEDS.global;
+  const allArticles: Record<string, unknown>[] = [];
+
+  for (const feedUrl of feeds) {
+    try {
+      const res = await fetch(feedUrl, { next: { revalidate: 3600 } });
+      if (!res.ok) continue;
+      const xml = await res.text();
+      const articles = parseRSS(xml, category, 10);
+      allArticles.push(...articles);
+    } catch (e) {
+      console.error(`RSS fallback error for ${feedUrl}:`, e);
+    }
+  }
+
+  return allArticles;
+}
+
 export async function GET(request: NextRequest) {
   // Rate limiting based on IP
   const ip = request.headers.get('x-forwarded-for') ||
@@ -109,7 +183,6 @@ export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
   const categoryParam = searchParams.get('category') || 'global';
 
-  // Validate category against allowlist
   if (!(categoryParam in VALID_CATEGORIES)) {
     return NextResponse.json(
       { error: 'Invalid category parameter.' },
@@ -117,7 +190,6 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // Validate search parameter: max length, alphanumeric + spaces + basic punctuation
   const searchParam = (searchParams.get('search') || '').trim();
   if (searchParam.length > MAX_SEARCH_LENGTH) {
     return NextResponse.json(
@@ -128,96 +200,84 @@ export async function GET(request: NextRequest) {
 
   const categoryQuery = VALID_CATEGORIES[categoryParam];
   const apiKey = process.env.NEWS_API_KEY;
+  let articles: Record<string, unknown>[] = [];
+  let usedFallback = false;
 
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: 'News service is currently unavailable.' },
-      { status: 503 }
-    );
+  // Try NewsAPI first if key exists
+  if (apiKey) {
+    const url = API_BASE + '/top-headlines?country=us&category=' + encodeURIComponent(categoryQuery) + '&pageSize=20&apiKey=' + encodeURIComponent(apiKey);
+
+    try {
+      const response = await fetch(url, { next: { revalidate: 86400 } });
+
+      if (response.ok) {
+        const data = await response.json();
+        const record = data as Record<string, unknown>;
+
+        if (record.status !== 'error' && Array.isArray(record.articles)) {
+          const rawArticles = record.articles as Array<Record<string, unknown>>;
+          articles = rawArticles
+            .filter((a) => {
+              if (!a || typeof a !== 'object') return false;
+              const raw = a.title;
+              return typeof raw === 'string' && raw.trim() !== '' && raw !== '[Removed]';
+            })
+            .map((a) => {
+              const { article } = sanitizeArticle(a, categoryParam);
+              return article;
+            })
+            .filter((article) => article.url && isValidUrl(article.url as string));
+        }
+      } else {
+        console.error('NewsAPI error:', response.status, response.statusText);
+        if (response.status === 429 || response.status >= 500) {
+          usedFallback = true;
+        }
+      }
+    } catch (e) {
+      console.error('NewsAPI fetch error:', e);
+      usedFallback = true;
+    }
+  } else {
+    usedFallback = true;
   }
 
-  const url = API_BASE + '/top-headlines?country=us&category=' + encodeURIComponent(categoryQuery) + '&pageSize=20&apiKey=' + encodeURIComponent(apiKey);
-
-  try {
-    const response = await fetch(url, { next: { revalidate: 86400 } });
-
-    if (!response.ok) {
-      // Log internally for debugging (in production, use a proper logger)
-      console.error('NewsAPI error:', response.status, response.statusText);
-
-      if (response.status === 429) {
-        return NextResponse.json(
-          { error: 'News service is temporarily rate-limited. Please try again in a moment.' },
-          { status: 429 }
-        );
+  // If NewsAPI failed or no key, use RSS fallback
+  if (usedFallback || articles.length === 0) {
+    console.log('[News] Falling back to RSS feeds for category:', categoryParam);
+    const rssArticles = await fetchRSSFallback(categoryParam);
+    // Merge and dedupe by URL
+    const seen = new Set(articles.map((a) => a.url as string));
+    for (const a of rssArticles) {
+      if (!seen.has(a.url as string)) {
+        seen.add(a.url as string);
+        articles.push(a);
       }
-      if (response.status === 401) {
-        return NextResponse.json(
-          { error: 'News service is currently unavailable.' },
-          { status: 503 }
-        );
-      }
-      return NextResponse.json(
-        { error: 'Failed to fetch news from source.' },
-        { status: 502 }
-      );
     }
-
-    const data = await response.json();
-    const record = data as Record<string, unknown>;
-
-    if (record.status === 'error') {
-      // Never echo the API error message to the client
-      console.error('NewsAPI returned error status');
-      return NextResponse.json(
-        { error: 'Failed to fetch news from source.' },
-        { status: 502 }
-      );
-    }
-
-    const rawArticles = Array.isArray(record.articles) ? record.articles : [];
-
-    const articles = rawArticles
-      .filter((a): a is Record<string, unknown> => {
-        if (!a || typeof a !== 'object') return false;
-        const raw = (a as Record<string, unknown>).title;
-        return typeof raw === 'string' && raw.trim() !== '' && raw !== '[Removed]';
-      })
-      .map((a) => {
-        const { validForImage, article } = sanitizeArticle(a, categoryParam);
-        return { article, validForImage };
-      })
-      .filter(({ article }) => article.url && isValidUrl(article.url as string));
-
-    // Apply server-side search filtering if search parameter is provided
-    let filteredArticles = articles.map(({ article }) => article);
-    if (searchParam) {
-      const lower = searchParam.toLowerCase();
-      // Sanitize search input: only allow safe characters
-      const safeSearch = searchParam.replace(/[<>\"'&]/g, '');
-      const safeLower = safeSearch.toLowerCase();
-      filteredArticles = filteredArticles.filter((a: Record<string, unknown>) => {
-        const title = String(a.title || '').toLowerCase();
-        const desc = a.description ? String(a.description).toLowerCase() : '';
-        return title.includes(safeLower) || desc.includes(safeLower);
-      });
-    }
-
-    // Set security headers
-    const headers = new Headers();
-    headers.set('X-Content-Type-Options', 'nosniff');
-    headers.set('X-Frame-Options', 'DENY');
-    headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-    headers.set('RateLimit-Remaining', String(rateLimit.remaining));
-
-    return NextResponse.json(
-      { articles: filteredArticles },
-      { headers }
-    );
-  } catch {
-    return NextResponse.json(
-      { error: 'Network error while fetching news.' },
-      { status: 500 }
-    );
   }
+
+  // Apply server-side search filtering if search parameter is provided
+  let filteredArticles = articles;
+  if (searchParam) {
+    const safeSearch = searchParam.replace(/[<>\"'&]/g, '');
+    const safeLower = safeSearch.toLowerCase();
+    filteredArticles = filteredArticles.filter((a) => {
+      const title = String(a.title || '').toLowerCase();
+      const desc = a.description ? String(a.description).toLowerCase() : '';
+      return title.includes(safeLower) || desc.includes(safeLower);
+    });
+  }
+
+  // Set security headers
+  const headers = new Headers();
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('X-Frame-Options', 'DENY');
+  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  headers.set('RateLimit-Remaining', String(rateLimit.remaining));
+  headers.set('X-Data-Source', usedFallback ? 'rss-fallback' : 'newsapi');
+
+  return NextResponse.json(
+    { articles: filteredArticles },
+    { headers }
+  );
 }

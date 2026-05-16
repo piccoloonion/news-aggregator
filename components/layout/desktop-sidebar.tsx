@@ -39,6 +39,14 @@ export function DesktopSidebar({ category, onCategoryChange }: DesktopSidebarPro
           ))}
         </TabsList>
       </Tabs>
+      
+      {/* Ad space */}
+      <div className="mt-auto p-3 border-t border-border/50">
+        <div className="rounded-lg bg-muted/30 p-3 text-center">
+          <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Sponsor</p>
+          <p className="text-xs text-muted-foreground">Ad space available</p>
+        </div>
+      </div>
     </aside>
   );
 }
